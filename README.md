@@ -1,4 +1,4 @@
-# PulseForge
+# Medinexus
 
 A healthcare platform for patients, doctors, and hospital admins. Built with React + Vite (TypeScript) on the frontend, Express + TypeScript on the backend, and Supabase (PostgreSQL) for the database and auth.
 
@@ -53,7 +53,7 @@ A healthcare platform for patients, doctors, and hospital admins. Built with Rea
 ## Project Structure
 
 ```
-pulseforge/
+medinexus/
 ├── client/          # React frontend
 │   └── src/
 │       ├── features/
