@@ -1,6 +1,15 @@
 import type { Request, Response, NextFunction } from 'express';
-import pdfParseLib from 'pdf-parse';
-const pdfParse = pdfParseLib as unknown as (buf: Buffer) => Promise<{ text: string }>;
+
+// pdf-parse v1.x runs a test-file at require-time which can crash in
+// serverless bundles (Vercel). Lazy-load it to surface a clear error instead.
+let _pdfParse: ((buf: Buffer) => Promise<{ text: string }>) | null = null;
+async function getPdfParse() {
+  if (!_pdfParse) {
+    const mod = await import('pdf-parse');
+    _pdfParse = (mod.default ?? mod) as unknown as (buf: Buffer) => Promise<{ text: string }>;
+  }
+  return _pdfParse;
+}
 import { supabaseAdmin } from '../../config/supabase.js';
 import { requirePatient } from '../../utils/lookup.js';
 import { sendSuccess } from '../../utils/response.js';
@@ -24,12 +33,14 @@ const cacheKey = (reportId: string, lang: Lang) => `${reportId}:${lang}`;
 // ─── PDF text extraction ──────────────────────────────────────────────────────
 
 async function extractTextFromPDF(reportUrl: string): Promise<string> {
+  console.log(`[reportSpeak] Fetching PDF from: ${reportUrl.slice(0, 80)}...`);
   const res = await fetch(reportUrl);
   if (!res.ok) {
     throw new AppError(`Failed to fetch report PDF: ${res.status} ${res.statusText}`, 502);
   }
   const arrayBuf = await res.arrayBuffer();
   const buffer = Buffer.from(arrayBuf);
+  const pdfParse = await getPdfParse();
   const parsed = await pdfParse(buffer);
   const text = parsed.text?.trim() ?? '';
   if (!text) {
@@ -42,7 +53,10 @@ async function extractTextFromPDF(reportUrl: string): Promise<string> {
 
 async function analyseReport(extractedText: string, reportName: string, lang: Lang): Promise<string> {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new AppError('OpenRouter API key not configured', 503);
+  if (!apiKey) {
+    console.error('[reportSpeak] OPENROUTER_API_KEY is missing from environment variables!');
+    throw new AppError('OpenRouter API key not configured', 503);
+  }
 
   // Truncate to stay within token limits (~6000 chars ≈ ~1500 tokens)
   const truncated = extractedText.slice(0, 6000);
@@ -133,10 +147,17 @@ function chunkText(text: string, maxLen = 490): string[] {
 }
 
 async function ttsChunk(text: string, lang: Lang): Promise<Buffer> {
+  const sarvamKey = process.env.SARVAM_API_KEY;
+  if (!sarvamKey) {
+    console.error('[reportSpeak] SARVAM_API_KEY is missing from environment variables!');
+    throw new AppError('Sarvam API key not configured', 503);
+  }
+
+  console.log(`[reportSpeak] Calling Sarvam TTS (${text.length} chars, lang=${lang})`);
   const res = await fetch('https://api.sarvam.ai/text-to-speech', {
     method: 'POST',
     headers: {
-      'api-subscription-key': process.env.SARVAM_API_KEY ?? '',
+      'api-subscription-key': sarvamKey,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -148,11 +169,15 @@ async function ttsChunk(text: string, lang: Lang): Promise<Buffer> {
   });
   if (!res.ok) {
     const txt = await res.text();
+    console.error(`[reportSpeak] Sarvam TTS error (${res.status}):`, txt);
     throw new AppError(`Sarvam TTS failed: ${txt}`, 502);
   }
   const data = await res.json() as any;
   const audioB64: string | undefined = Array.isArray(data?.audios) ? data.audios[0] : undefined;
-  if (!audioB64) throw new AppError('Sarvam TTS returned no audio', 502);
+  if (!audioB64) {
+    console.error('[reportSpeak] Sarvam TTS returned no audio. Response:', JSON.stringify(data).slice(0, 500));
+    throw new AppError('Sarvam TTS returned no audio', 502);
+  }
   return Buffer.from(audioB64, 'base64');
 }
 

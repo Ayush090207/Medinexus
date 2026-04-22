@@ -1,6 +1,15 @@
 import type { Request, Response, NextFunction } from 'express';
-import pdfParseLib from 'pdf-parse';
-const pdfParse = pdfParseLib as unknown as (buf: Buffer) => Promise<{ text: string }>;
+
+// pdf-parse v1.x runs a test-file at require-time which can crash in
+// serverless bundles (Vercel). Lazy-load it to surface a clear error instead.
+let _pdfParse: ((buf: Buffer) => Promise<{ text: string }>) | null = null;
+async function getPdfParse() {
+  if (!_pdfParse) {
+    const mod = await import('pdf-parse');
+    _pdfParse = (mod.default ?? mod) as unknown as (buf: Buffer) => Promise<{ text: string }>;
+  }
+  return _pdfParse;
+}
 import { supabaseAdmin } from '../../config/supabase.js';
 import { requirePatient } from '../../utils/lookup.js';
 import { sendSuccess } from '../../utils/response.js';
@@ -39,6 +48,7 @@ async function extractTextSafe(url: string, maxChars = 1500): Promise<string | n
     const res = await fetch(url);
     if (!res.ok) return null;
     const buf = Buffer.from(await res.arrayBuffer());
+    const pdfParse = await getPdfParse();
     const { text } = await pdfParse(buf);
     return text?.trim().slice(0, maxChars) || null;
   } catch {
